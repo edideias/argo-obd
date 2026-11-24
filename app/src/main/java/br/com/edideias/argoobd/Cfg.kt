@@ -62,6 +62,11 @@ class Cfg(ctx: Context) {
         get() = sp.getBoolean("demo", false)
         set(v) { sp.edit().putBoolean("demo", v).apply() }
 
+    /** 0 Carbono, 1 Hi-Tech, 2 Clássico */
+    var theme: Int
+        get() = sp.getInt("theme", 0)
+        set(v) { sp.edit().putInt("theme", v).apply() }
+
     var keepOn: Boolean
         get() = sp.getBoolean("keepOn", true)
         set(v) { sp.edit().putBoolean("keepOn", v).apply() }

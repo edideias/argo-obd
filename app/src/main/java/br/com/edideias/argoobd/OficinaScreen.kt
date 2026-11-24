@@ -32,7 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
 private val SUBS = listOf("Ao vivo", "Gráfico", "Saúde", "Cálculos", "Prontidão", "Modo 06", "Congelados", "Módulos", "Leitor", "Terminal", "Info")
-private val SERIES = listOf(C.TEAL, C.WARN, C.SKY)
+private val SERIES: List<androidx.compose.ui.graphics.Color> get() = listOf(C.TEAL, C.WARN, C.SKY)
 
 @Composable
 fun OficinaScreen(m: Manager) {

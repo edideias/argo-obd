@@ -33,6 +33,9 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawBehind
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
@@ -54,6 +57,7 @@ class MainActivity : ComponentActivity() {
         window.statusBarColor = 0xFF05080D.toInt()
         window.navigationBarColor = 0xFF05080D.toInt()
         val m = Hub.get(this)
+        Themes.id = m.cfg.theme
         setContent {
             MaterialTheme(colorScheme = darkColorScheme(background = C.BG, surface = C.BG, primary = C.TEAL)) {
                 Root(m)
@@ -105,6 +109,12 @@ private fun Root(m: Manager) {
         if (!m.isRunning() && (m.cfg.demo || m.cfg.lastDevice.isNotEmpty())) connect()
     }
 
+    androidx.compose.runtime.LaunchedEffect(Themes.id) {
+        val w = (ctx as? android.app.Activity)?.window
+        w?.statusBarColor = C.BG.toArgb()
+        w?.navigationBarColor = C.BG.toArgb()
+    }
+
     BackHandler(enabled = hud || tab != 0) {
         if (hud) hud = false else tab = 0
     }
@@ -114,7 +124,21 @@ private fun Root(m: Manager) {
         return
     }
 
-    Column(Modifier.fillMaxSize().background(Brush.verticalGradient(listOf(C.BG2, C.BG)))) {
+    val grid = Themes.cur.cut
+    val gridColor = C.TEAL.copy(alpha = 0.06f)
+    Column(
+        Modifier.fillMaxSize()
+            .background(Brush.verticalGradient(listOf(C.BG2, C.BG)))
+            .drawBehind {
+                if (grid) {
+                    val step = 34.dp.toPx()
+                    var x = 0f
+                    while (x < size.width) { drawLine(gridColor, Offset(x, 0f), Offset(x, size.height), 1f); x += step }
+                    var y = 0f
+                    while (y < size.height) { drawLine(gridColor, Offset(0f, y), Offset(size.width, y), 1f); y += step }
+                }
+            }
+    ) {
         TopBar(m)
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when (tab) {
@@ -146,7 +170,7 @@ private fun TopBar(m: Manager) {
             Dot(col, 10.dp)
             Spacer(Modifier.width(10.dp))
             Column(Modifier.weight(1f)) {
-                T("ARGO OBD", 11.sp, C.TEAL, FontWeight.Bold)
+                T(if (Themes.cur.mono) "ARGO//OBD" else "ARGO OBD", 11.sp, C.TEAL, FontWeight.Bold)
                 T(m.status + if (m.demoMode && m.connected) " · demonstração" else "", 12.sp, C.DIM, lines = 1)
             }
             val v = m.fresh(Pids.VOLT, 15000)
@@ -162,7 +186,7 @@ private fun TopBar(m: Manager) {
 @Composable
 private fun BottomBar(sel: Int, onSel: (Int) -> Unit) {
     Row(
-        Modifier.fillMaxWidth().background(Color(0xFF080D14)).padding(horizontal = 6.dp, vertical = 6.dp),
+        Modifier.fillMaxWidth().background(C.BG).padding(horizontal = 6.dp, vertical = 6.dp),
         horizontalArrangement = Arrangement.SpaceBetween
     ) {
         TABS.forEachIndexed { i, t ->
@@ -171,7 +195,7 @@ private fun BottomBar(sel: Int, onSel: (Int) -> Unit) {
                 Modifier
                     .weight(1f)
                     .padding(horizontal = 3.dp)
-                    .clip(RoundedCornerShape(16.dp))
+                    .clip(buttonShape())
                     .background(if (on) C.TEAL.copy(alpha = 0.14f) else Color.Transparent)
                     .clickable { onSel(i) }
                     .padding(vertical = 7.dp),

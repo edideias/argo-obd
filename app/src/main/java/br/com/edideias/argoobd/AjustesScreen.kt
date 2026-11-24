@@ -25,6 +25,10 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
@@ -65,6 +69,52 @@ private fun Toggle(title: String, sub: String, on: Boolean, set: (Boolean) -> Un
 }
 
 @Composable
+private fun ThemeCard(i: Int, selected: Boolean, modifier: Modifier, onClick: () -> Unit) {
+    val th = Themes.list[i]
+    val shape = if (th.cut) androidx.compose.foundation.shape.CutCornerShape(topStart = 14.dp, bottomEnd = 14.dp)
+    else androidx.compose.foundation.shape.RoundedCornerShape(16.dp)
+    Column(
+        modifier
+            .clip(shape)
+            .background(androidx.compose.ui.graphics.Brush.verticalGradient(listOf(th.bg2, th.bg)))
+            .border(if (selected) 2.dp else 1.dp, if (selected) th.a1 else th.line, shape)
+            .clickable { onClick() }
+            .padding(10.dp)
+    ) {
+        // miniatura: arco/barras com as cores do tema
+        androidx.compose.foundation.Canvas(Modifier.fillMaxWidth().height(54.dp)) {
+            val w = size.width
+            val h = size.height
+            when (th.gauge) {
+                1 -> {
+                    val n = 14
+                    for (k in 0 until n) {
+                        val on = k < 9
+                        drawRect(
+                            if (on) androidx.compose.ui.graphics.lerp(th.a1, th.a2, k / 9f) else th.track,
+                            topLeft = androidx.compose.ui.geometry.Offset(w * k / n + 2f, h * 0.2f + (if (k % 2 == 0) 0f else 3f)),
+                            size = androidx.compose.ui.geometry.Size(w / n - 4f, h * 0.6f)
+                        )
+                    }
+                }
+                2 -> {
+                    drawCircle(th.card1, radius = h * 0.46f, center = androidx.compose.ui.geometry.Offset(w / 2, h / 2))
+                    drawCircle(th.a2, radius = h * 0.46f, center = androidx.compose.ui.geometry.Offset(w / 2, h / 2), style = androidx.compose.ui.graphics.drawscope.Stroke(3f))
+                    drawLine(th.a1, androidx.compose.ui.geometry.Offset(w / 2, h / 2), androidx.compose.ui.geometry.Offset(w / 2 + h * 0.3f, h / 2 - h * 0.22f), strokeWidth = 5f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+                }
+                else -> {
+                    drawArc(th.track, 135f, 270f, false, androidx.compose.ui.geometry.Offset(w / 2 - h * 0.45f, h * 0.05f), androidx.compose.ui.geometry.Size(h * 0.9f, h * 0.9f), style = androidx.compose.ui.graphics.drawscope.Stroke(7f, cap = androidx.compose.ui.graphics.StrokeCap.Round))
+                    drawArc(th.a1, 135f, 170f, false, androidx.compose.ui.geometry.Offset(w / 2 - h * 0.45f, h * 0.05f), androidx.compose.ui.geometry.Size(h * 0.9f, h * 0.9f), style = androidx.compose.ui.graphics.drawscope.Stroke(7f, cap = androidx.compose.ui.graphics.StrokeCap.Round))
+                }
+            }
+        }
+        Spacer(Modifier.height(6.dp))
+        T(th.name, 13.sp, th.text, FontWeight.Bold, lines = 1)
+        T(th.desc, 10.sp, th.dim, lines = 2)
+    }
+}
+
+@Composable
 fun AjustesScreen(m: Manager, onReconnect: () -> Unit, hasPerm: Boolean, askPerm: () -> Unit) {
     val ctx = LocalContext.current
     val cfg = m.cfg
@@ -91,6 +141,16 @@ fun AjustesScreen(m: Manager, onReconnect: () -> Unit, hasPerm: Boolean, askPerm
         Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 14.dp, vertical = 8.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp)
     ) {
+        Section("Aparência")
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            for (i in Themes.list.indices) {
+                ThemeCard(i, Themes.id == i, Modifier.weight(1f)) {
+                    Themes.id = i
+                    cfg.theme = i
+                }
+            }
+        }
+
         Section("Leitor Bluetooth")
         Panel {
             if (!hasPerm) {
