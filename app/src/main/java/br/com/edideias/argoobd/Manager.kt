@@ -48,6 +48,13 @@ class Manager(private val ctx: Context, val cfg: Cfg) {
     @Volatile var instLh: Double? = null
 
     val trip = Trip(cfg.sp)
+    @Volatile var batchOk = false
+    @Volatile var avgLatency = 0L
+    @Volatile var lastSpd = 0.0
+    @Volatile var lastSpdT = 0L
+    private val alertLast = HashMap<String, Long>()
+    @Volatile var alertNow: List<String> = emptyList()
+    val accel = Accel(cfg)
 
     private var thread: Thread? = null
     @Volatile private var want = false
@@ -134,6 +141,17 @@ class Manager(private val ctx: Context, val cfg: Cfg) {
         link.query("ATSP0", 2500)
     }
 
+    /** Descobre se o leitor aceita vários PIDs numa consulta só (bem mais rápido em CAN). */
+    private fun testBatch(link: Link) {
+        batchOk = false
+        val sup = supported
+        if (!(sup.contains(0x0C) && sup.contains(0x0D))) return
+        val t0 = System.currentTimeMillis()
+        val r = Obd.multi(link.query("010C0D", 2500), listOf(0x0C, 0x0D))
+        avgLatency = System.currentTimeMillis() - t0
+        batchOk = r != null && r.size >= 2
+    }
+
     private fun session(link: Link) {
         miss.clear()
         status = "Leitor conectado — procurando a ECU…"
@@ -171,6 +189,7 @@ class Manager(private val ctx: Context, val cfg: Cfg) {
         ecuOk = true
         status = "Conectado"
         readStatus(link)
+        testBatch(link)
         poll(link)
     }
 
@@ -195,23 +214,28 @@ class Manager(private val ctx: Context, val cfg: Cfg) {
         var fails = 0
         lastTripT = System.currentTimeMillis()
         while (want) {
+            val c0 = System.currentTimeMillis()
             runTasks(link)
             val sup = supported
             val t1 = tier1(sup)
             var ok = 0
-            for (pid in t1) if (readPid(link, pid)) ok++
-            val others: List<Int> = if (liveMode == 1) {
-                sup.filter { it !in t1 }
-            } else {
-                painelSlow.filter { it in sup && it !in t1 }
-            }
-            val k = if (liveMode == 1) 3 else 2
-            repeat(k) {
-                if (others.isNotEmpty()) {
-                    val pid = others[slowIdx % others.size]
-                    slowIdx++
-                    if (readPid(link, pid)) ok++
+            val fast = if (accel.active()) listOf(0x0D) else t1
+            ok += readGroup(link, fast)
+            if (!accel.active()) {
+                val others: List<Int> = if (liveMode == 1) {
+                    sup.filter { it !in t1 }
+                } else {
+                    (painelSlow + cfg.motorPids).distinct().filter { it in sup && it !in t1 }
                 }
+                val k = if (batchOk) (if (liveMode == 1) 5 else 4) else (if (liveMode == 1) 3 else 2)
+                val grp = ArrayList<Int>()
+                if (others.isNotEmpty()) {
+                    repeat(minOf(k, others.size)) {
+                        grp.add(others[slowIdx % others.size])
+                        slowIdx++
+                    }
+                }
+                ok += readGroup(link, grp.distinct())
             }
             val now = System.currentTimeMillis()
             if (now - lastV > 4000) {
@@ -235,9 +259,56 @@ class Manager(private val ctx: Context, val cfg: Cfg) {
                 status = "Conectado"
             }
             updateTrip()
+            checkAlerts()
             logRow()
+            val dt = System.currentTimeMillis() - c0
+            avgLatency = if (avgLatency == 0L) dt else (avgLatency * 7 + dt) / 8
         }
     }
+
+    /** Lê um grupo de PIDs: em lote quando o leitor aguenta, senão um a um. */
+    private fun readGroup(link: Link, pids: List<Int>): Int {
+        if (pids.isEmpty()) return 0
+        if (!batchOk || pids.size == 1) {
+            var ok = 0
+            for (p in pids) if (readPid(link, p)) ok++
+            return ok
+        }
+        var ok = 0
+        var i = 0
+        while (i < pids.size) {
+            val part = pids.subList(i, minOf(i + 6, pids.size))
+            i += 6
+            val cmd = "01" + part.joinToString("") { "%02X".format(it) }
+            val r = Obd.multi(link.query(cmd, 2500), part)
+            if (r == null) {
+                // lote falhou: cai para consulta individual neste ciclo
+                for (p in part) if (readPid(link, p)) ok++
+                batchFail++
+                if (batchFail >= 4) batchOk = false
+            } else {
+                batchFail = 0
+                for (p in part) {
+                    val v = r[p]
+                    if (v != null) {
+                        miss[p] = 0
+                        put(p, v)
+                        ok++
+                    } else {
+                        val n = (miss[p] ?: 0) + 1
+                        miss[p] = n
+                        if (n >= 8 && p != 0x0C && p != 0x0D) {
+                            supported = supported - p
+                            miss.remove(p)
+                        }
+                    }
+                }
+            }
+        }
+        return ok
+    }
+
+    private var batchFail = 0
 
     private fun readPid(link: Link, pid: Int): Boolean {
         val d = Pids.map[pid] ?: return false
@@ -275,7 +346,19 @@ class Manager(private val ctx: Context, val cfg: Cfg) {
 
     private fun put(pid: Int, v: Double) {
         values[pid] = v
-        stamps[pid] = System.currentTimeMillis()
+        val nowMs = System.currentTimeMillis()
+        stamps[pid] = nowMs
+        if (pid == 0x0D) {
+            accel.feed(v, nowMs)
+            val dtv = (nowMs - lastSpdT) / 1000.0
+            if (lastSpdT > 0 && dtv in 0.05..1.5) {
+                val acc = (v - lastSpd) / 3.6 / dtv // m/s²
+                if (acc > 3.0 && v > 5) trip.hardAcc++
+                if (acc < -3.5) { trip.hardBrk++ }
+            }
+            lastSpd = v
+            lastSpdT = nowMs
+        }
         val mn = mins[pid]
         if (mn == null || v < mn) mins[pid] = v
         val mx = maxs[pid]
@@ -319,7 +402,25 @@ class Manager(private val ctx: Context, val cfg: Cfg) {
         val lh = Calc.fuelLh(values, cfg)
         instLh = lh
         instKmL = if (lh != null && lh > 0.05 && spd > 3) spd / lh else null
-        trip.add(dt, spd, lh ?: 0.0, cfg.price())
+        trip.add(dt, spd, rpm, lh ?: 0.0, cfg.price())
+        val dk = (spd * dt / 3600.0).toFloat()
+        cfg.odo = cfg.odo + dk
+        cfg.lifeDist = cfg.lifeDist + dk
+        cfg.lifeLiters = cfg.lifeLiters + ((lh ?: 0.0) * dt / 3600.0).toFloat()
+    }
+
+    private fun checkAlerts() {
+        if (!cfg.alertsOn) { alertNow = emptyList(); return }
+        val out = ArrayList<String>()
+        fresh(0x05)?.let { if (it >= cfg.tempMax) out.add("Motor quente: ${it.toInt()} °C") }
+        val volt = fresh(Pids.VOLT, 15000)
+        val rpm = fresh(0x0C)
+        if (volt != null && volt < cfg.voltMin && (rpm ?: 0.0) > 600) out.add("Bateria/alternador fraco: ${Fmt.num(volt, 1)} V")
+        if (cfg.rpmMax > 0 && rpm != null && rpm >= cfg.rpmMax) out.add("Giro alto: ${rpm.toInt()} rpm")
+        val spd = fresh(0x0D)
+        if (cfg.speedMax > 0 && spd != null && spd >= cfg.speedMax) out.add("Velocidade acima de ${cfg.speedMax} km/h")
+        if (milOn) out.add("Luz de injeção acesa (MIL)")
+        alertNow = out
     }
 
     // -------- tarefas pedidas pela tela --------
@@ -394,6 +495,94 @@ class Manager(private val ctx: Context, val cfg: Cfg) {
             "PIDs aceitos (${supported.size})" to
                 supported.joinToString(" ") { "%02X".format(it) }.ifEmpty { "—" }
         )
+        out.toList()
+    }, cb)
+
+    /** Modo 06: resultados dos autotestes da ECU (catalisador, sondas, falhas de ignição…). */
+    fun readMode06(cb: (Result<List<Obd.Mon>>) -> Unit) = ask({ l ->
+        val mids = TreeSet<Int>()
+        var base = 0x00
+        while (base <= 0xC0) {
+            val m = Obd.supportMask(l.query("06%02X".format(base), 4000), base, 6) ?: break
+            mids.addAll(m)
+            if (!m.contains(base + 0x20)) break
+            base += 0x20
+        }
+        mids.removeAll(setOf(0x20, 0x40, 0x60, 0x80, 0xA0, 0xC0))
+        val out = ArrayList<Obd.Mon>()
+        for (mid in mids.take(40)) out.addAll(Obd.mode06(l.query("06%02X".format(mid), 3000)))
+        out.toList()
+    }, cb)
+
+    /** Mede a qualidade do leitor: tempo de resposta e falhas. */
+    fun adapterTest(cb: (Result<List<Pair<String, String>>>) -> Unit) = ask({ l ->
+        var okN = 0
+        var tot = 0L
+        var worst = 0L
+        val n = 12
+        repeat(n) {
+            val t0 = System.currentTimeMillis()
+            val r = l.query("010C", 2500)
+            val dt = System.currentTimeMillis() - t0
+            if (Obd.data(r, 1, 0x0C) != null) { okN++; tot += dt; if (dt > worst) worst = dt }
+        }
+        val out = ArrayList<Pair<String, String>>()
+        out.add("Respostas válidas" to "$okN de $n")
+        out.add("Tempo médio por consulta" to if (okN > 0) "${tot / okN} ms" else "—")
+        out.add("Pior tempo" to if (okN > 0) "$worst ms" else "—")
+        out.add("Leitura em lote (vários PIDs)" to if (batchOk) "sim — leitura rápida" else "não — leitura um a um")
+        out.add("Tensão no conector" to (values[Pids.VOLT]?.let { Fmt.num(it, 1) + " V" } ?: "—"))
+        val grade = when {
+            okN < n -> "instável — pode perder dados"
+            tot / okN.coerceAtLeast(1) < 120 -> "ótimo"
+            tot / okN.coerceAtLeast(1) < 250 -> "bom"
+            else -> "lento (comum em clone barato)"
+        }
+        out.add("Avaliação" to grade)
+        out.toList()
+    }, cb)
+
+    private fun stripHdr(resp: String): List<Pair<String, IntArray>> {
+        val out = ArrayList<Pair<String, IntArray>>()
+        for (raw in resp.split('\r', '\n')) {
+            val line = raw.trim().uppercase().replace(" ", "")
+            if (line.length < 8 || !line.all { it in '0'..'9' || it in 'A'..'F' }) continue
+            val id = line.take(3)
+            val body = line.substring(3)
+            if (body.length % 2 != 0) continue
+            out.add(id to IntArray(body.length / 2) { body.substring(it * 2, it * 2 + 2).toInt(16) })
+        }
+        return out
+    }
+
+    /**
+     * Varre módulos que respondem na rede CAN (somente leitura de identificação).
+     * Fiat usa protocolos próprios para ABS/airbag/painel; aqui só aparece o que responder ao padrão UDS.
+     */
+    fun scanModules(cb: (Result<List<Pair<String, String>>>) -> Unit) = ask({ l ->
+        val out = ArrayList<Pair<String, String>>()
+        try {
+            l.query("ATH1", 1500)
+            val broadcast = Obd.ecuIds(l.query("0100", 6000))
+            for (id in broadcast) out.add("Resposta OBD de $id" to "módulo de motor/OBD")
+            val heads = listOf("7E0", "7E1", "7E2", "7E3", "7E4", "7A0", "7B0", "7C0", "7D0", "740", "744", "750", "760", "764", "770")
+            for (h in heads) {
+                l.query("ATSH$h", 1200)
+                val r = l.query("22F190", 900)
+                val fr = stripHdr(r).firstOrNull { it.second.size >= 3 && it.second[1] == 0x62 }
+                    ?: stripHdr(r).firstOrNull { it.second.any { b -> b == 0x62 } }
+                if (fr != null) {
+                    val txt = Obd.asciiOf(fr.second)
+                    out.add("Módulo $h → ${fr.first}" to (if (txt.length >= 5) "VIN/ID: $txt" else "respondeu"))
+                } else if (r.contains("7F")) {
+                    out.add("Módulo $h" to "respondeu, mas não permite leitura padrão")
+                }
+            }
+        } finally {
+            l.query("ATSH7DF", 1200)
+            l.query("ATH0", 1200)
+        }
+        if (out.isEmpty()) out.add("Nenhum módulo respondeu" to "o Argo costuma restringir módulos de fábrica ao protocolo Fiat")
         out.toList()
     }, cb)
 

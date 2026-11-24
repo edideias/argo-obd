@@ -30,8 +30,10 @@ jobs:
           if [ -n "$KS_B64" ]; then
             echo "$KS_B64" | base64 -d > "$RUNNER_TEMP/release.jks"
             echo "KEYSTORE_FILE=$RUNNER_TEMP/release.jks" >> "$GITHUB_ENV"
+            echo "ASSINADO=sim" >> "$GITHUB_ENV"
           else
             echo "::warning::Sem KEYSTORE_B64: APK assinado com chave de debug"
+            echo "ASSINADO=nao" >> "$GITHUB_ENV"
           fi
 
       - name: Compilar
@@ -39,7 +41,22 @@ jobs:
           KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
           KEY_ALIAS: argo
           KEY_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
-        run: gradle :app:assembleRelease --no-daemon --stacktrace
+        run: |
+          set -o pipefail
+          gradle :app:assembleRelease --no-daemon --stacktrace 2>&1 | tee build.log
+
+      - name: Guardar log da falha
+        if: failure()
+        run: |
+          git config user.name ci
+          git config user.email ci@example.com
+          { echo "== ERROS =="; grep -E "^e: |error:|What went wrong|FAILED|Unresolved|Exception" -A2 build.log | head -150; echo; echo "== FINAL =="; tail -n 60 build.log; } > /tmp/log.txt
+          git checkout --orphan buildlog
+          git rm -rf . -q || true
+          cp /tmp/log.txt log.txt
+          git add log.txt
+          git commit -q -m "log do build ${{ github.run_number }}"
+          git push -f origin buildlog
 
       - name: Nomear APK
         run: cp app/build/outputs/apk/release/app-release.apk ArgoOBD.apk
@@ -53,6 +70,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "v1.0.${{ github.run_number }}" ArgoOBD.apk \
-            --title "Argo OBD 1.0.${{ github.run_number }}" \
-            --notes "Build automático #${{ github.run_number }}" --latest
+          gh release create "v2.0.${{ github.run_number }}" ArgoOBD.apk \
+            --title "Argo OBD 2.0.${{ github.run_number }}" \
+            --notes "Build automático #${{ github.run_number }} (assinado: $ASSINADO)" --latest

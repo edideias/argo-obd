@@ -153,8 +153,8 @@ object Obd {
         return d.f(b)
     }
 
-    fun supportMask(resp: String, base: Int): Set<Int>? {
-        val b = data(resp, 1, base) ?: return null
+    fun supportMask(resp: String, base: Int, mode: Int = 1): Set<Int>? {
+        val b = data(resp, mode, base) ?: return null
         if (b.size < 4) return null
         val out = HashSet<Int>()
         for (i in 0 until 32) {
@@ -223,6 +223,97 @@ object Obd {
             if (f.size >= 3 && f[0] == 0x42 && f[1] == pid) return f.copyOfRange(3, f.size)
         }
         return null
+    }
+
+    /** Resposta a vários PIDs numa só consulta (ex.: 010C0D05). */
+    fun multi(resp: String, pids: List<Int>): Map<Int, Double>? {
+        for (f in frames(resp)) {
+            if (f.isEmpty() || f[0] != 0x41) continue
+            var i = 1
+            val out = HashMap<Int, Double>()
+            while (i < f.size) {
+                val pid = f[i]
+                val d = Pids.map[pid] ?: break
+                if (i + 1 + d.len > f.size) break
+                out[pid] = d.f(f.copyOfRange(i + 1, i + 1 + d.len))
+                i += 1 + d.len
+            }
+            val r = out.filterKeys { it in pids }
+            if (r.isNotEmpty()) return r
+        }
+        return null
+    }
+
+    class Mon(val mid: Int, val tid: Int, val uas: Int, val value: Int, val min: Int, val max: Int) {
+        val ok: Boolean get() = value in min..max
+    }
+
+    /** Modo 06: resultados dos testes de monitoramento da ECU. */
+    fun mode06(resp: String): List<Mon> {
+        val out = ArrayList<Mon>()
+        for (f in frames(resp)) {
+            if (f.size < 10 || f[0] != 0x46) continue
+            val mid = f[1]
+            var i = 2
+            while (i + 8 <= f.size) {
+                val tid = f[i]
+                val uas = f[i + 1]
+                val v = f[i + 2] * 256 + f[i + 3]
+                val mn = f[i + 4] * 256 + f[i + 5]
+                val mx = f[i + 6] * 256 + f[i + 7]
+                i += 8
+                if (tid == 0 && v == 0 && mn == 0 && mx == 0) continue
+                out.add(Mon(mid, tid, uas, v, mn, mx))
+            }
+        }
+        return out
+    }
+
+    fun monName(mid: Int): String = when (mid) {
+        in 0x01..0x04 -> "Sonda lambda B1S${mid}"
+        in 0x05..0x08 -> "Sonda lambda B2S${mid - 4}"
+        0x21 -> "Catalisador banco 1"
+        0x22 -> "Catalisador banco 2"
+        0x31 -> "EGR banco 1"
+        0x32 -> "EGR banco 2"
+        0x39 -> "EVAP (0,090\")"
+        0x3A -> "EVAP (0,040\")"
+        0x3B -> "EVAP (0,020\")"
+        0x3C -> "EVAP (válvula de purga)"
+        in 0x41..0x44 -> "Aquecedor sonda B1S${mid - 0x40}"
+        in 0x45..0x48 -> "Aquecedor sonda B2S${mid - 0x44}"
+        0x71 -> "Ar secundário"
+        0xA1 -> "Falhas de ignição (geral)"
+        0xA2 -> "Falhas de ignição cilindro 1"
+        0xA3 -> "Falhas de ignição cilindro 2"
+        0xA4 -> "Falhas de ignição cilindro 3"
+        0xA5 -> "Falhas de ignição cilindro 4"
+        else -> "Monitor %02X".format(mid)
+    }
+
+    /** Leitura UDS (serviço 22): bytes depois de "62 hh ll". */
+    fun did(resp: String, did: Int): IntArray? {
+        for (f in frames(resp)) {
+            if (f.size >= 3 && f[0] == 0x62 && f[1] == ((did shr 8) and 0xFF) && f[2] == (did and 0xFF)) {
+                return f.copyOfRange(3, f.size)
+            }
+        }
+        return null
+    }
+
+    fun asciiOf(b: IntArray): String =
+        b.filter { it in 0x20..0x7E }.map { it.toChar() }.joinToString("").trim()
+
+    /** Endereços de ECU que responderam (com cabeçalhos ligados, ATH1 e ATS0). */
+    fun ecuIds(resp: String): List<String> {
+        val out = LinkedHashSet<String>()
+        for (raw in resp.split('\r', '\n')) {
+            val line = raw.trim().uppercase().replace(" ", "")
+            if (line.length >= 6 && line.take(3).all { it in '0'..'9' || it in 'A'..'F' } &&
+                line.take(3).startsWith("7") && line.all { it in '0'..'9' || it in 'A'..'F' }
+            ) out.add(line.take(3))
+        }
+        return out.toList()
     }
 
     fun cleanLine(resp: String): String =

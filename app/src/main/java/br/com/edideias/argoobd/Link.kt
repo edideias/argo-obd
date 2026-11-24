@@ -139,29 +139,83 @@ class DemoLink : Link {
         )
     }
 
+    private var headers = false
+
     override fun query(cmd: String, timeoutMs: Long): String {
-        Thread.sleep(35)
+        Thread.sleep(30)
         val c = cmd.uppercase().replace(" ", "")
         if (c.startsWith("AT")) {
             return when {
                 c == "ATZ" || c == "ATI" -> "ELM327 v1.5 (demo)"
                 c == "ATDP" -> "ISO 15765-4 (CAN 11/500)"
                 c == "ATRV" -> "13.9V"
+                c == "AT@1" -> "OBDII to RS232 Interpreter"
+                c == "ATH1" -> { headers = true; "OK" }
+                c == "ATH0" -> { headers = false; "OK" }
                 else -> "OK"
             }
         }
-        if (c.length == 4 && c.startsWith("01")) {
-            val p = c.substring(2).toIntOrNull(16) ?: return "?"
-            if (p == 0x00 || p == 0x20 || p == 0x40 || p == 0x60) return mask(p)
-            if (p == 0x01) return if (cleared) "41 01 00 07 65 00" else "41 01 81 07 65 04"
-            val d = if (p in sup) encode(p) else null
-            return if (d == null) "NO DATA" else "41 %02X ".format(p) + hex(*d)
+        // consulta de modo 01 (um ou vários PIDs, com dígito final opcional de contagem)
+        if (c.length >= 4 && c.startsWith("01")) {
+            var body = c.substring(2)
+            if (body.length % 2 == 1) body = body.dropLast(1)
+            val pids = body.chunked(2).mapNotNull { it.toIntOrNull(16) }
+            if (pids.size == 1) {
+                val p = pids[0]
+                if (p == 0x00 || p == 0x20 || p == 0x40 || p == 0x60) {
+                    val m = mask(p)
+                    return if (headers && p == 0x00) "7E8 06 $m" else m
+                }
+                if (p == 0x01) return if (cleared) "41 01 00 07 65 00" else "41 01 81 07 65 04"
+            }
+            val sb = StringBuilder("41")
+            var any = false
+            for (p in pids) {
+                val d = if (p in sup) encode(p) else null
+                if (d != null) {
+                    sb.append(" %02X ".format(p)).append(hex(*d))
+                    any = true
+                }
+            }
+            return if (any) sb.toString() else "NO DATA"
         }
         if (c.length == 6 && c.startsWith("02") && c.endsWith("00")) {
             val p = c.substring(2, 4).toIntOrNull(16) ?: return "?"
             if (p == 0x02) return if (cleared) "NO DATA" else "42 02 00 01 71"
             val d = if (p in sup) encode(p) else null
             return if (d == null) "NO DATA" else "42 %02X 00 ".format(p) + hex(*d)
+        }
+        // modo 06
+        if (c.length == 4 && c.startsWith("06")) {
+            val m = c.substring(2).toIntOrNull(16) ?: return "?"
+            val mids = setOf(0x01, 0x02, 0x21, 0xA1, 0xA2, 0xA3, 0xA4)
+            if (m == 0x00 || m == 0x20 || m == 0x40 || m == 0x60 || m == 0x80 || m == 0xA0 || m == 0xC0) {
+                var mk = 0L
+                for (i in 0 until 32) if ((m + i + 1) in mids) mk = mk or (1L shl (31 - i))
+                if (mids.any { it > m + 32 }) mk = mk or 1L
+                return "46 %02X %02X %02X %02X %02X".format(m, (mk shr 24) and 0xFF, (mk shr 16) and 0xFF, (mk shr 8) and 0xFF, mk and 0xFF)
+            }
+            if (m !in mids) return "NO DATA"
+            val n = (System.currentTimeMillis() / 1000 % 7).toInt()
+            return when (m) {
+                0x01 -> "46 01 0A 0B %02X %02X 00 00 00 FF".format(0x01, 0x40 + n)
+                0x02 -> "46 02 0A 0B %02X %02X 00 00 00 FF".format(0x00, 0x50 + n)
+                0x21 -> "46 21 A0 0B 03 E8 00 00 07 D0"
+                else -> "46 %02X 0B 0C 00 00 00 00 00 0A".format(m)
+            }
+        }
+        // UDS (serviço 22)
+        if (c.length == 6 && c.startsWith("22")) {
+            val did = c.substring(2).toIntOrNull(16) ?: return "?"
+            fun txt(t: String) = "62 %02X %02X ".format(did shr 8, did and 0xFF) + t.map { "%02X".format(it.code) }.joinToString(" ")
+            return when (did) {
+                0xF190 -> txt("9BDDEMO0000000001")
+                0xF187 -> txt("DEMO-PN-5206")
+                0xF189 -> txt("SW 11GF.2026")
+                0xF191 -> txt("HW DEMO 1.0")
+                0xF18C -> txt("SN0000DEMO")
+                else -> "7F 22 31"
+            }
         }
         return when (c) {
             "03" -> if (cleared) "43 00" else "43 01 01 71"
@@ -170,6 +224,7 @@ class DemoLink : Link {
             "04" -> { cleared = true; "44" }
             "0902" -> "49 02 01 39 42 44 44 45 4D 4F 30 30 30 30 30 30 30 30 31"
             "0904" -> "49 04 01 44 45 4D 4F 2D 43 41 4C"
+            "090A" -> "49 0A 01 45 43 4D 2D 4D 41 52 45 4C 4C 49"
             else -> "NO DATA"
         }
     }

@@ -27,6 +27,29 @@ object Calc {
         return null
     }
 
+    /** Relação ar/combustível atual estimada (lambda comandado x estequiométrica). */
+    fun airFuel(v: Map<Int, Double>, cfg: Cfg): Double? {
+        val lam = v[0x44] ?: return null
+        val e = v[0x52]?.let { (it / 100.0).coerceIn(0.0, 1.0) } ?: cfg.ethFrac()
+        return lam * afr(e)
+    }
+
+    /** Potência estimada (cv) pelo combustível queimado, rendimento térmico ~28%. Só serve como ordem de grandeza. */
+    fun powerCv(v: Map<Int, Double>, cfg: Cfg): Double? {
+        val lh = fuelLh(v, cfg) ?: return null
+        val e = v[0x52]?.let { (it / 100.0).coerceIn(0.0, 1.0) } ?: cfg.ethFrac()
+        val gs = lh * density(e) / 3600.0
+        val lhv = 43400.0 * (1 - e) + 26800.0 * e // J/g
+        return gs * lhv * 0.28 / 735.5
+    }
+
+    fun torqueNm(v: Map<Int, Double>, cfg: Cfg): Double? {
+        val cv = powerCv(v, cfg) ?: return null
+        val rpm = v[0x0C] ?: return null
+        if (rpm < 500) return null
+        return cv * 735.5 / (rpm * 2 * Math.PI / 60.0)
+    }
+
     fun method(v: Map<Int, Double>): String = when {
         v.containsKey(0x5E) -> "taxa de combustível da ECU"
         v.containsKey(0x10) -> "sensor de fluxo de ar (MAF)"
